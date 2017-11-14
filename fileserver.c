@@ -10,14 +10,20 @@
 #include <errno.h>
 #include <sys/epoll.h>
 #include <stdbool.h>
+#include <netdb.h>
+#include <unistd.h>
+#include <net/if.h>
+#include <sys/stat.h>
 
-#define SERVER_IP "127.0.0.1"
 #define SERVER_PORT 62341
 #define MAX_EVENTS 10
 #define MAX_BUF_SIZE 1024
 
 int epoll_fd;
 int gRun = 1;
+struct epoll_event ev;
+
+char ip[32]={0};
 
 static int server_init(void)
 {
@@ -46,7 +52,7 @@ static int server_init(void)
 	memset(&serveraddr, 0, sizeof(serveraddr));
 	serveraddr.sin_family = AF_INET;
 	serveraddr.sin_port = htons(SERVER_PORT);
-	serveraddr.sin_addr.s_addr = inet_addr(SERVER_IP);
+	serveraddr.sin_addr.s_addr = inet_addr(ip);
 	if (bind(listenfd, (struct sockaddr *)&serveraddr, sizeof(serveraddr)) < 0) {
 		printf("Socket bind port (%d) error: %s\n",SERVER_PORT, strerror(errno));
 		goto OUT;
@@ -65,31 +71,60 @@ OUT:
 
 int handle_recv(int fd)
 {
-	char buf[MAX_BUF_SIZE + 1];
-	int len;
+	char buf[MAX_BUF_SIZE + 1] = {0};
+	int len =  recv(fd, buf, MAX_BUF_SIZE, 0);
 
-	printf("------------start------------\n");
-	bzero(buf, MAX_BUF_SIZE + 1);
-	while (1) {
-		len = recv(fd, buf, MAX_BUF_SIZE, MSG_DONTWAIT);
-		printf("fd is %d, recv len is %d\n", fd, len);
-		printf("msg is %s\n", buf);
-		if (len < 0) {
-			printf("errno is %d, %s\n", errno, strerror(errno));
-			return -1;
-		}
-	 	if (len == 0) {
-	 		printf("+++++++++++++end++++++++++\n");
-			close(fd);
-			return 0;
-		}
+	if (len == 0) {
+		close(fd);
+		return -1;
 	}
-	return len;
+	printf("fd is %d, filename is %s\n", fd, buf);
+
+	FILE *fp = fopen(buf, "rb");
+	if (fp == NULL) {
+		printf("file is not exsit\n");
+		return -1;
+	}
+
+	struct stat file_stat;
+	stat(buf, &file_stat);
+	printf("filesize is %d\n", (int)file_stat.st_size);
+
+	int read_len = 0;
+	int send_len = 0;
+	int total = 0;
+
+	while (1) {
+		read_len = fread(buf, 1, MAX_BUF_SIZE, fp);
+		if (read_len == 0)
+			break;
+		//printf("read_len is %d\n", read_len);
+		send_len = send(fd, buf, read_len, 0);
+		total += send_len;
+	}
+	printf("total send is %d\n", total);
+	close(fd);
+	fclose(fp);
+	return 0;
 }
 
 int handle_error(int fd)
 {
 	printf("fd %d occurs error\n", fd);
+	epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, &ev);
+	close(fd);
+	return 0;
+}
+
+int getLocalIP(const char *nic){
+	int inet_sock;
+	struct ifreq ifr;
+
+	inet_sock = socket(AF_INET, SOCK_DGRAM, 0);
+	strcpy(ifr.ifr_name, nic);
+	ioctl(inet_sock, SIOCGIFADDR, &ifr);
+	strcpy(ip, inet_ntoa(((struct sockaddr_in *)&ifr.ifr_addr)->sin_addr));
+	printf("ip is %s\n", ip);
 	return 0;
 }
 
@@ -101,7 +136,11 @@ int main(int argc, char const *argv[])
 	socklen_t sin_size = sizeof(struct sockaddr_storage);
 	char buf[100];
 
-	struct epoll_event ev;
+	if (argc != 2) {
+		printf("use like this : ./fileserver eth0\n");
+		return 0;
+	}
+	getLocalIP(argv[1]);
 
 	server_fd = server_init();
 	if (server_fd < 0) {
